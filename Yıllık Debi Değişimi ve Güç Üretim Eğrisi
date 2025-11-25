@@ -1,0 +1,73 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# --- 1. SABİT PARAMETRELER ---
+NET_DUSU_H = 50       # Metre (Suyun düştüğü yükseklik)
+SANTRAL_VERIMI = 0.85 # Türbin + Jeneratör verimi (%85)
+YER_CEKIMI = 9.81     # m/s^2
+
+# --- 2. DEBİ SİMÜLASYONU (Mevsimsel Akış) ---
+# Yılın 365 günü için debi (m3/s) simüle edelim
+days = np.arange(1, 366)
+
+# Debi Modeli: 
+# İlkbaharda (Nisan-Mayıs gibi 100.-150. günler) kar erimesiyle zirve yapar.
+# Yazın kuraklık ile düşer.
+def debi_modeli(day):
+    base_flow = 20 # Nehrin en kurak andaki can suyu (m3/s)
+    # Sinüs dalgası ile ilkbahar taşkınını simüle et
+    # 120. gün civarı (Nisan sonu) zirve yapsın
+    flood = 50 * np.exp(-0.5 * ((day - 120) / 40) ** 2) 
+    # Sonbahar yağmurları (küçük bir artış)
+    rain = 15 * np.exp(-0.5 * ((day - 300) / 30) ** 2)
+    
+    return base_flow + flood + rain + np.random.normal(0, 2) # Biraz rastgelelik ekle
+
+daily_flow = [max(5, debi_modeli(d)) for d in days] # Debi eksiye düşmesin
+
+# Veri Çerçevesi
+df = pd.DataFrame({'Gun': days, 'Debi_m3s': daily_flow})
+
+# --- 3. GÜÇ HESABI (kW ve MW) ---
+# Formül: P (kW) = 9.81 * Q * H * Verim
+df['Guc_kW'] = 9.81 * df['Debi_m3s'] * NET_DUSU_H * SANTRAL_VERIMI
+df['Guc_MW'] = df['Guc_kW'] / 1000
+
+# Enerji Hesabı (Günlük Üretim)
+# Güç (kW) x 24 saat = kWh
+df['Uretim_kWh'] = df['Guc_kW'] * 24
+
+# --- 4. SONUÇ VE GRAFİK ---
+toplam_uretim_mwh = df['Uretim_kWh'].sum() / 1000
+ortalama_guc = df['Guc_MW'].mean()
+
+print("-" * 40)
+print("HİDROELEKTRİK SANTRAL (HES) SİMÜLASYONU")
+print("-" * 40)
+print(f"Net Düşü (Yükseklik): {NET_DUSU_H} m")
+print(f"Yıllık Toplam Üretim: {toplam_uretim_mwh:.2f} MWh")
+print(f"Ortalama Santral Gücü: {ortalama_guc:.2f} MW")
+print(f"Maksimum Debi Anı   : {df['Debi_m3s'].max():.2f} m3/s")
+print("-" * 40)
+
+# Grafik Çizimi (İki Eksenli)
+fig, ax1 = plt.subplots(figsize=(12, 6))
+
+color = 'tab:blue'
+ax1.set_xlabel('Yılın Günleri (1-365)')
+ax1.set_ylabel('Nehir Debisi (m3/s)', color=color, fontweight='bold')
+ax1.plot(df['Gun'], df['Debi_m3s'], color=color, alpha=0.6)
+ax1.tick_params(axis='y', labelcolor=color)
+ax1.fill_between(df['Gun'], df['Debi_m3s'], color=color, alpha=0.1)
+
+ax2 = ax1.twinx()  
+color = 'tab:red'
+ax2.set_ylabel('Elektrik Gücü (MW)', color=color, fontweight='bold')
+ax2.plot(df['Gun'], df['Guc_MW'], color=color, linewidth=2)
+ax2.tick_params(axis='y', labelcolor=color)
+
+plt.title('HES Simülasyonu: Debi Değişimine Göre Güç Üretimi')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
