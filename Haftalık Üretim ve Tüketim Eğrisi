@@ -1,0 +1,119 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import requests
+import io
+import numpy as np
+
+# ==========================================
+# 1. AYARLAR (GİRDİLER)
+# ==========================================
+LATITUDE = 40.77  # Sakarya Enlemi
+LONGITUDE = 30.40 # Sakarya Boylamı
+YIL = 2020        # Gerçek verisi çekilecek yıl
+PANEL_GUCU_W = 455
+PANEL_SAYISI = 14
+SISTEM_VERIMI = 0.82
+ELEKTRIK_FIYATI = 3.40   # TL/kWh
+KURULUM_MALIYETI = 90000 # TL
+CO2_KATSAYISI = 0.480    # kg CO2 / kWh
+
+print("Veriler PVGIS sunucusundan çekiliyor, lütfen bekleyin...")
+
+# ==========================================
+# 2. VERİ ÇEKME (PVGIS API)
+# ==========================================
+url = (f"https://re.jrc.ec.europa.eu/api/v5_2/seriescalc"
+       f"?lat={LATITUDE}&lon={LONGITUDE}&startyear={YIL}&endyear={YIL}"
+       f"&pvcalculation=1&peakpower=1&loss=14&outputformat=csv")
+
+try:
+    response = requests.get(url)
+    data_io = io.StringIO(response.text)
+    # Header ve footer ayarları PVGIS formatına göredir
+    df = pd.read_csv(data_io, header=8, skipfooter=10, engine='python')
+    
+    # Sütun isimlerini düzeltme
+    df = df.rename(columns={'time': 'Tarih', 'P': 'Uretim_W'})
+    df['Tarih'] = pd.to_datetime(df['Tarih'], format='%Y%m%d:%H%M')
+    df.set_index('Tarih', inplace=True)
+
+except Exception as e:
+    print("HATA: Veri çekilemedi. İnternet bağlantınızı kontrol edin.")
+    print(e)
+
+# ==========================================
+# 3. HESAPLAMALAR (ÜRETİM + EKONOMİ + TÜKETİM)
+# ==========================================
+
+# A. Üretim Hesabı
+KURULU_GUC_KW = (PANEL_GUCU_W * PANEL_SAYISI) / 1000
+# Gelen veri 1kW içindi, kendi sistemimizle çarpıyoruz
+df['Uretim_kWh'] = (df['Uretim_W'] / 1000) * KURULU_GUC_KW * SISTEM_VERIMI
+
+# B. Ekonomik Hesap (HATANIN ÇÖZÜLDÜĞÜ YER BURASI)
+# Bu satır eksik olduğu için hata alıyordun, şimdi ekledik:
+df['Kazanc_TL'] = df['Uretim_kWh'] * ELEKTRIK_FIYATI
+
+# C. Ev Tüketim Simülasyonu
+def ev_tuketim_profili(saat):
+    if 0 <= saat < 6: return 0.3
+    elif 6 <= saat < 9: return 1.5
+    elif 9 <= saat < 17: return 0.5
+    elif 17 <= saat < 23: return 2.5
+    else: return 0.8
+
+df['Tuketim_kWh'] = [ev_tuketim_profili(h) for h in df.index.hour]
+
+# D. Çevresel Etki
+toplam_uretim = df['Uretim_kWh'].sum()
+onlenen_co2_kg = toplam_uretim * CO2_KATSAYISI
+kurtarilan_agac = onlenen_co2_kg / 20
+
+# E. Ekonomik Özet Verileri
+yillik_kazanc = df['Kazanc_TL'].sum()
+amortisman_suresi = KURULUM_MALIYETI / yillik_kazanc if yillik_kazanc > 0 else 999
+
+# ==========================================
+# 4. RAPORLAMA (SONUÇ EKRANI)
+# ==========================================
+print("\n" + "="*40)
+print(f"   SAKARYA GES PROJESİ SONUÇLARI ({YIL})")
+print("="*40)
+print(f"Toplam Yıllık Üretim : {toplam_uretim:.2f} kWh")
+print(f"Toplam Ev Tüketimi   : {df['Tuketim_kWh'].sum():.2f} kWh")
+print("-" * 40)
+print(f" EKONOMİK ANALİZ:")
+print(f"Yıllık Net Kazanç    : {yillik_kazanc:.2f} TL")
+print(f"Sistem Maliyeti      : {KURULUM_MALIYETI} TL")
+print(f"Amortisman Süresi    : {amortisman_suresi:.1f} YIL")
+print("-" * 40)
+print(f" ÇEVRESEL ETKİ:")
+print(f"Önlenen CO2 Salınımı : {onlenen_co2_kg:.2f} kg")
+print(f"Kurtarılan Ağaç      : {int(kurtarilan_agac)} adet")
+print("="*40)
+
+# ==========================================
+# 5. GRAFİK ÇİZİMİ
+# ==========================================
+baslangic = f'{YIL}-07-01'
+bitis = f'{YIL}-07-07'
+haftalik_df = df[baslangic:bitis]
+
+plt.figure(figsize=(12, 6))
+plt.plot(haftalik_df.index, haftalik_df['Uretim_kWh'], label='Üretim (Güneş)', color='orange', linewidth=2)
+plt.plot(haftalik_df.index, haftalik_df['Tuketim_kWh'], label='Tüketim (Ev)', color='blue', linestyle='--', alpha=0.7)
+
+plt.fill_between(haftalik_df.index, haftalik_df['Uretim_kWh'], haftalik_df['Tuketim_kWh'], 
+                 where=(haftalik_df['Uretim_kWh'] > haftalik_df['Tuketim_kWh']), 
+                 color='green', alpha=0.3, label='Şebekeye Satış')
+
+plt.fill_between(haftalik_df.index, haftalik_df['Uretim_kWh'], haftalik_df['Tuketim_kWh'], 
+                 where=(haftalik_df['Uretim_kWh'] < haftalik_df['Tuketim_kWh']), 
+                 color='red', alpha=0.1, label='Şebekeden Alış')
+
+plt.title(f'Üretim vs Tüketim Dengesi (Temmuz Haftası Örneği)')
+plt.ylabel('Enerji (kWh)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
