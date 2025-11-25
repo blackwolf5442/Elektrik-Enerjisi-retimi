@@ -1,0 +1,104 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import requests
+import io
+
+# ==========================================
+# 1. AYARLAR (Konum ve Sistem)
+# ==========================================
+# Şu anki koordinatlar: SAKARYA (Adapazarı)
+LATITUDE = 40.77
+LONGITUDE = 30.40
+YIL = 2020               # Hangi yılın gerçek verilerini çekelim?
+PANEL_GUCU_W = 455       # Watt
+PANEL_SAYISI = 14        # Adet
+SISTEM_VERIMI = 0.82     # Kayıplar sonrası kalan verim
+ELEKTRIK_FIYATI = 3.40   # TL
+
+print(f"Bağlanılıyor: PVGIS Veritabanı (Avrupa Komisyonu)...")
+print(f"Konum: Enlem {LATITUDE}, Boylam {LONGITUDE}")
+
+# ==========================================
+# 2. VERİYİ İNTERNETTEN ÇEKME (API)
+# ==========================================
+# PVGIS API URL'sini oluşturuyoruz (Otomatik indirme linki)
+# Bu link bize 2020 yılının saatlik verilerini CSV olarak verir.
+url = (f"https://re.jrc.ec.europa.eu/api/v5_2/seriescalc"
+       f"?lat={LATITUDE}&lon={LONGITUDE}&startyear={YIL}&endyear={YIL}"
+       f"&pvcalculation=1&peakpower=1&loss=14&outputformat=csv")
+
+try:
+    # İnternetten veriyi iste
+    response = requests.get(url)
+    
+    if response.status_code == 200:
+        print("Veri başarıyla indirildi! İşleniyor...")
+        
+        # Gelen veri ham metin halindedir, bunu pandas'ın okuyacağı formata çevirelim
+        # PVGIS genelde ilk 10 satıra açıklama yazar, asıl veri "time" ile başlar.
+        # Bu yüzden header=8 diyerek üstteki gereksiz yazıları atlıyoruz (deneme yanılma ile sabittir).
+        data_io = io.StringIO(response.text)
+        
+        # skipfooter=10: En alttaki özet satırlarını okumasın
+        df = pd.read_csv(data_io, header=8, skipfooter=10, engine='python')
+        
+        # Sütun isimlerini düzeltelim (PVGIS 'P' sütunu güç verir)
+        # time: TarihSaat, P: Power (Watt), G(i): Işınım
+        df = df.rename(columns={'time': 'Tarih', 'P': 'Uretim_W', 'G(i)': 'Isinim'})
+        
+        # Tarih formatını ayarla
+        df['Tarih'] = pd.to_datetime(df['Tarih'], format='%Y%m%d:%H%M')
+        df.set_index('Tarih', inplace=True)
+        
+    else:
+        print("Hata: Veri çekilemedi. İnternet bağlantınızı kontrol edin.")
+        
+except Exception as e:
+    print(f"Bir hata oluştu: {e}")
+
+# ==========================================
+# 3. GERÇEK VERİYİ ÖLÇEKLEME VE HESAPLAMA
+# ==========================================
+# PVGIS varsayılan olarak 1kWp'lik sistem verisi gönderir.
+# Bizim sistemimiz (14 panel * 455W) = 6.37 kWp.
+KURULU_GUC_KW = (PANEL_GUCU_W * PANEL_SAYISI) / 1000
+
+# Gelen veri 1kW içindi, kendi sistemimizle çarpıyoruz
+# Ayrıca verim kaybını da hesaba katıyoruz.
+df['Gercek_Uretim_kWh'] = (df['Uretim_W'] / 1000) * KURULU_GUC_KW * SISTEM_VERIMI
+df['Kazanc_TL'] = df['Gercek_Uretim_kWh'] * ELEKTRIK_FIYATI
+
+# Aylık Toplamlar
+aylik_ozet = df.resample('M').sum()
+
+# ==========================================
+# 4. GRAFİK VE SONUÇ
+# ==========================================
+yillik_uretim = df['Gercek_Uretim_kWh'].sum()
+yillik_kazanc = df['Kazanc_TL'].sum()
+
+print("\n" + "="*40)
+print(f"SAKARYA İÇİN {YIL} YILI GERÇEK VERİ ANALİZİ")
+print("="*40)
+print(f"Toplam Üretim : {yillik_uretim:.2f} kWh")
+print(f"Toplam Kazanç : {yillik_kazanc:.2f} TL")
+print("="*40)
+
+# Grafik
+fig, ax1 = plt.subplots(figsize=(12, 6))
+
+# Çubuklar (Gerçek Üretim)
+color = '#2980b9' # Mavi
+aylik_ozet['Gercek_Uretim_kWh'].plot(kind='bar', ax=ax1, color=color, width=0.7)
+ax1.set_title(f'Sakarya - {YIL} Yılı Gerçek Güneş Enerjisi Verileriyle Üretim', fontsize=14)
+ax1.set_ylabel('Üretilen Enerji (kWh)', fontweight='bold')
+ax1.set_xticklabels(['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'], rotation=0)
+ax1.grid(axis='y', alpha=0.5)
+
+# Çubukların üzerine değerleri yazdıralım
+for p in ax1.patches:
+    ax1.annotate(f"{int(p.get_height())}", (p.get_x() + p.get_width() / 2., p.get_height()),
+                ha='center', va='center', xytext=(0, 5), textcoords='offset points')
+
+plt.tight_layout()
+plt.show()
